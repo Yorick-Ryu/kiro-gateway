@@ -1,12 +1,13 @@
+version: '3.8'
+
 services:
   kiro-gateway:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: kiro-gateway
-    user: "0:0"
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
     environment:
       # Server configuration
       - SERVER_HOST=0.0.0.0
@@ -48,17 +49,12 @@ services:
       
       # Mount kiro-cli database (if using KIRO_CLI_DB_FILE)
       # Uncomment and adjust path as needed:
-      - /root/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli:ro
-      - /root/kiro-accounts:/home/kiro/kiro-accounts:ro
-      - ./account_data:/app/account_data
+      # - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli  # Linux/macOS
       
       # Mount debug logs directory (optional, for debugging)
       - ./debug_logs:/app/debug_logs
     
     restart: unless-stopped
-    networks:
-      - default
-      - new-api-network
     
     # Health check
     healthcheck:
@@ -73,7 +69,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1'        # Maximum CPU cores (streaming can be CPU-intensive)
+          cpus: '2'        # Maximum CPU cores (streaming can be CPU-intensive)
           memory: 1G       # Maximum memory (sufficient for FastAPI + streaming)
         reservations:
           cpus: '0.5'      # Minimum guaranteed CPU
@@ -82,6 +78,3 @@ services:
 networks:
   default:
     name: kiro-gateway-network
-  new-api-network:
-    external: true
-    name: new-api-deploy_new-api-network
