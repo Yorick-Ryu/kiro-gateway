@@ -176,6 +176,126 @@ class TestPromptCacheTracker:
 
         assert usage.cache_read_input_tokens == 42
 
+    @pytest.mark.asyncio
+    async def test_appended_turn_reads_cache_control_prefix(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=True)
+        long_text = "cacheable prompt chunk " * 256
+
+        first = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": long_text,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            ],
+            tools=None,
+            system="system",
+            input_tokens=1000,
+        )
+        second = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": long_text,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": "first reply"},
+                {"role": "user", "content": "follow-up"},
+            ],
+            tools=None,
+            system="system",
+            input_tokens=1200,
+        )
+
+        assert first.cache_creation_input_tokens > 0
+        assert first.cache_read_input_tokens == 0
+        assert second.cache_read_input_tokens > 0
+        assert second.cache_creation_input_tokens > 0
+        assert second.cache_read_input_tokens + second.cache_creation_input_tokens <= 1200
+
+    @pytest.mark.asyncio
+    async def test_changed_cache_control_prefix_does_not_read(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=True)
+
+        await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "stable prefix A " * 256,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            ],
+            tools=None,
+            system=None,
+            input_tokens=800,
+        )
+        usage = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "stable prefix B " * 256,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            ],
+            tools=None,
+            system=None,
+            input_tokens=800,
+        )
+
+        assert usage.cache_read_input_tokens == 0
+        assert usage.cache_creation_input_tokens > 0
+
+    @pytest.mark.asyncio
+    async def test_without_cache_control_appended_turn_does_not_read_prefix(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=True)
+
+        await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            system=None,
+            input_tokens=50,
+        )
+        usage = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "follow-up"},
+            ],
+            tools=None,
+            system=None,
+            input_tokens=80,
+        )
+
+        assert usage.cache_read_input_tokens == 0
+        assert usage.cache_creation_input_tokens == 80
+
 
 class TestModelInfoCacheUpdate:
     """Тесты обновления кэша."""
