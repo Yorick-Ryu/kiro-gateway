@@ -9,7 +9,7 @@ import asyncio
 import time
 import pytest
 
-from kiro.cache import ModelInfoCache
+from kiro.cache import ModelInfoCache, PromptCacheTracker
 from kiro.config import DEFAULT_MAX_INPUT_TOKENS
 
 
@@ -54,6 +54,127 @@ class TestModelInfoCacheInitialization:
         print("Проверка: last_update_time изначально None...")
         print(f"Сравниваем last_update_time: Ожидалось None, Получено {cache.last_update_time}")
         assert cache.last_update_time is None
+
+
+class TestPromptCacheTracker:
+    """Tests for prompt cache usage accounting."""
+
+    @pytest.mark.asyncio
+    async def test_first_request_reports_cache_creation(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=True)
+
+        usage = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            system="system",
+            input_tokens=123,
+        )
+
+        assert usage.cache_creation_input_tokens == 123
+        assert usage.cache_read_input_tokens == 0
+        assert usage.to_anthropic_usage_fields() == {
+            "cache_creation_input_tokens": 123
+        }
+
+    @pytest.mark.asyncio
+    async def test_repeated_request_reports_cache_read(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=True)
+        request = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": None,
+            "system": "system",
+            "input_tokens": 123,
+        }
+
+        await cache.record(**request)
+        usage = await cache.record(**request)
+
+        assert usage.cache_creation_input_tokens == 0
+        assert usage.cache_read_input_tokens == 123
+        assert usage.to_anthropic_usage_fields() == {
+            "cache_read_input_tokens": 123
+        }
+
+    @pytest.mark.asyncio
+    async def test_ttl_expiry_creates_new_entry(self, monkeypatch):
+        cache = PromptCacheTracker(cache_ttl=10, enabled=True)
+        now = 1000.0
+        monkeypatch.setattr("kiro.cache.time.time", lambda: now)
+        request = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": None,
+            "system": None,
+            "input_tokens": 50,
+        }
+
+        first = await cache.record(**request)
+        now = 1011.0
+        second = await cache.record(**request)
+
+        assert first.cache_creation_input_tokens == 50
+        assert second.cache_creation_input_tokens == 50
+        assert second.cache_read_input_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_ttl_is_not_refreshed_on_hit(self, monkeypatch):
+        cache = PromptCacheTracker(cache_ttl=10, enabled=True)
+        now = 1000.0
+        monkeypatch.setattr("kiro.cache.time.time", lambda: now)
+        request = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": None,
+            "system": None,
+            "input_tokens": 50,
+        }
+
+        await cache.record(**request)
+        now = 1005.0
+        hit = await cache.record(**request)
+        now = 1011.0
+        expired = await cache.record(**request)
+
+        assert hit.cache_read_input_tokens == 50
+        assert expired.cache_creation_input_tokens == 50
+
+    @pytest.mark.asyncio
+    async def test_disabled_tracker_reports_no_usage(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=False)
+
+        usage = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            system=None,
+            input_tokens=123,
+        )
+
+        assert usage.to_anthropic_usage_fields() == {}
+        assert cache.size == 0
+
+    @pytest.mark.asyncio
+    async def test_dict_order_does_not_affect_fingerprint(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=True)
+
+        await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[{"role": "user", "content": {"b": 2, "a": 1}}],
+            tools=None,
+            system=None,
+            input_tokens=42,
+        )
+        usage = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[{"content": {"a": 1, "b": 2}, "role": "user"}],
+            tools=None,
+            system=None,
+            input_tokens=42,
+        )
+
+        assert usage.cache_read_input_tokens == 42
 
 
 class TestModelInfoCacheUpdate:

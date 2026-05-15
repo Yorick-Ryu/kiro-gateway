@@ -25,12 +25,20 @@ with TTL and lazy loading support.
 """
 
 import asyncio
+import hashlib
+import json
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from kiro.config import MODEL_CACHE_TTL, DEFAULT_MAX_INPUT_TOKENS
+from kiro.config import (
+    MODEL_CACHE_TTL,
+    DEFAULT_MAX_INPUT_TOKENS,
+    PROMPT_CACHE_TTL_SECONDS,
+    PROMPT_CACHE_ACCOUNTING_ENABLED,
+)
 
 
 class ModelInfoCache:
@@ -180,3 +188,146 @@ class ModelInfoCache:
     def last_update_time(self) -> Optional[float]:
         """Last update time (timestamp) or None."""
         return self._last_update
+
+
+@dataclass
+class PromptCacheUsage:
+    """Anthropic-compatible prompt cache usage fields."""
+
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+    def to_anthropic_usage_fields(self) -> Dict[str, int]:
+        """Return non-zero Anthropic usage fields."""
+        fields: Dict[str, int] = {}
+        if self.cache_read_input_tokens > 0:
+            fields["cache_read_input_tokens"] = self.cache_read_input_tokens
+        if self.cache_creation_input_tokens > 0:
+            fields["cache_creation_input_tokens"] = self.cache_creation_input_tokens
+        return fields
+
+
+@dataclass
+class _PromptCacheEntry:
+    tokens: int
+    expires_at: float
+
+
+class PromptCacheTracker:
+    """
+    In-memory prompt cache accounting.
+
+    This only reports Anthropic cache usage fields. It does not cache model
+    responses and does not alter upstream requests. Entry TTL is fixed when the
+    entry is created and is not refreshed by cache hits.
+    """
+
+    def __init__(
+        self,
+        cache_ttl: int = PROMPT_CACHE_TTL_SECONDS,
+        enabled: bool = PROMPT_CACHE_ACCOUNTING_ENABLED,
+    ):
+        self._cache_ttl = cache_ttl
+        self._enabled = enabled
+        self._entries: Dict[str, _PromptCacheEntry] = {}
+        self._lock = asyncio.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def size(self) -> int:
+        self._prune_expired(time.time())
+        return len(self._entries)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    async def record(
+        self,
+        *,
+        model: str,
+        messages: Optional[List[Dict[str, Any]]],
+        tools: Optional[List[Dict[str, Any]]],
+        system: Optional[Any],
+        input_tokens: int,
+    ) -> PromptCacheUsage:
+        """
+        Record a successful request and return cache accounting usage.
+
+        Args:
+            model: Requested model name
+            messages: Anthropic request messages as dictionaries
+            tools: Anthropic request tools as dictionaries
+            system: Anthropic system prompt
+            input_tokens: Estimated input tokens for this request
+        """
+        if not self._enabled or input_tokens <= 0:
+            return PromptCacheUsage()
+
+        key = self._fingerprint(
+            model=model,
+            messages=messages or [],
+            tools=tools,
+            system=system,
+        )
+        now = time.time()
+
+        async with self._lock:
+            self._prune_expired(now)
+            entry = self._entries.get(key)
+            if entry and entry.expires_at > now:
+                return PromptCacheUsage(cache_read_input_tokens=entry.tokens)
+
+            self._entries[key] = _PromptCacheEntry(
+                tokens=input_tokens,
+                expires_at=now + self._cache_ttl,
+            )
+            return PromptCacheUsage(cache_creation_input_tokens=input_tokens)
+
+    def _prune_expired(self, now: float) -> None:
+        expired_keys = [
+            key for key, entry in self._entries.items()
+            if entry.expires_at <= now
+        ]
+        for key in expired_keys:
+            self._entries.pop(key, None)
+
+    def _fingerprint(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        system: Optional[Any],
+    ) -> str:
+        payload = {
+            "model": model,
+            "system": self._normalize(system),
+            "tools": self._normalize(tools or []),
+            "messages": self._normalize(messages),
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _normalize(self, value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return self._normalize(value.model_dump(exclude_none=True))
+        if isinstance(value, dict):
+            return {
+                str(key): self._normalize(item)
+                for key, item in sorted(value.items(), key=lambda kv: str(kv[0]))
+                if item is not None
+            }
+        if isinstance(value, list):
+            return [self._normalize(item) for item in value]
+        return value
+
+
+prompt_cache_tracker = PromptCacheTracker()

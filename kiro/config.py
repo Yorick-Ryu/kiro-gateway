@@ -292,6 +292,15 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
 # Model cache TTL in seconds (1 hour)
 MODEL_CACHE_TTL: int = 3600
 
+# Prompt cache accounting TTL in seconds (5 minutes)
+PROMPT_CACHE_TTL_SECONDS: int = int(os.getenv("PROMPT_CACHE_TTL_SECONDS", "300"))
+
+# Enable Anthropic prompt cache usage accounting.
+# This only adds usage fields; responses are never cached.
+PROMPT_CACHE_ACCOUNTING_ENABLED: bool = os.getenv(
+    "PROMPT_CACHE_ACCOUNTING_ENABLED", "true"
+).lower() in ("true", "1", "yes")
+
 # Default maximum number of input tokens
 DEFAULT_MAX_INPUT_TOKENS: int = 200000
 
@@ -574,4 +583,3 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
-
