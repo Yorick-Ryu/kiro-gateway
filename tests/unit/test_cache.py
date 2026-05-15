@@ -296,6 +296,33 @@ class TestPromptCacheTracker:
         assert usage.cache_read_input_tokens == 0
         assert usage.cache_creation_input_tokens == 80
 
+    @pytest.mark.asyncio
+    async def test_long_request_without_cache_control_can_read_prefix(self):
+        cache = PromptCacheTracker(cache_ttl=300, enabled=True)
+        long_text = "new api may strip cache control " * 600
+
+        await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[{"role": "user", "content": long_text}],
+            tools=None,
+            system=None,
+            input_tokens=2000,
+        )
+        usage = await cache.record(
+            model="claude-sonnet-4.6",
+            messages=[
+                {"role": "user", "content": long_text},
+                {"role": "assistant", "content": "first reply"},
+                {"role": "user", "content": "follow-up"},
+            ],
+            tools=None,
+            system=None,
+            input_tokens=2100,
+        )
+
+        assert usage.cache_read_input_tokens > 0
+        assert usage.cache_creation_input_tokens > 0
+
 
 class TestModelInfoCacheUpdate:
     """Тесты обновления кэша."""

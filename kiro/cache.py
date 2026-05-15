@@ -218,6 +218,7 @@ class _PromptCacheBlock:
     prefix_fingerprint: str
     cumulative_tokens: int
     breakpoint: bool = False
+    implicit_breakpoint: bool = False
 
 
 class PromptCacheTracker:
@@ -374,17 +375,32 @@ class PromptCacheTracker:
                     prefix_fingerprint=prefix_hash,
                     cumulative_tokens=cumulative_tokens,
                     breakpoint=False,
+                    implicit_breakpoint=is_message_end,
                 ))
 
-        # Preserve the old accounting behavior for callers that do not send
-        # Anthropic cache_control markers: exact repeated requests still report
-        # cache reads, but appended conversations do not accidentally match.
         if not has_explicit_breakpoint:
-            blocks[-1] = _PromptCacheBlock(
-                prefix_fingerprint=prefix_hash,
-                cumulative_tokens=input_tokens,
-                breakpoint=True,
-            )
+            min_cacheable_tokens = self._minimum_cacheable_tokens(model)
+            implicit_blocks = [
+                _PromptCacheBlock(
+                    prefix_fingerprint=block.prefix_fingerprint,
+                    cumulative_tokens=block.cumulative_tokens,
+                    breakpoint=block.cumulative_tokens >= min_cacheable_tokens,
+                    implicit_breakpoint=block.implicit_breakpoint,
+                )
+                for block in blocks
+            ]
+            if any(block.breakpoint for block in implicit_blocks):
+                blocks = implicit_blocks
+            else:
+                # Preserve the old behavior for short callers without
+                # Anthropic cache_control markers: exact repeated requests
+                # still report cache reads, but appended short conversations do
+                # not accidentally match.
+                blocks[-1] = _PromptCacheBlock(
+                    prefix_fingerprint=prefix_hash,
+                    cumulative_tokens=input_tokens,
+                    breakpoint=True,
+                )
 
         return blocks
 
@@ -492,6 +508,14 @@ class PromptCacheTracker:
             separators=(",", ":"),
         )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _minimum_cacheable_tokens(self, model: str) -> int:
+        model_lower = model.lower()
+        if "opus" in model_lower:
+            return 4096
+        if "haiku-3" in model_lower or "haiku_3" in model_lower:
+            return 2048
+        return 1024
 
     def _normalize(self, value: Any) -> Any:
         if hasattr(value, "model_dump"):
